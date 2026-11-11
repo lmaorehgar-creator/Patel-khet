@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patel Khet – Field Tracker</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;700;800&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#e6ece3;--card:#f4f7f1;--ink:#16241b;--muted:#57675c;--line:#c6d1c3;--water:#2a7ab0;--warn:#b0502a;--ok:#2f7d3a}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1912;--card:#15241b;--ink:#e3ece4;--muted:#93a699;--line:#2a3d31;--water:#5db0e6;--warn:#e88a5c;--ok:#6cc27a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 'Public Sans',system-ui,sans-serif}
+h1,h2,.big{font-family:'Bricolage Grotesque','Public Sans',system-ui,sans-serif;margin:0}
+header{padding:18px 16px 12px;max-width:900px;margin:0 auto}
+h1{font-size:2rem;font-weight:800;letter-spacing:-.02em}
+header p{margin:2px 0 0;color:var(--muted);font-size:.9rem}
+#map{height:46vh;min-height:300px;max-width:900px;margin:0 auto;border-radius:14px}
+.wrap{max-width:900px;margin:0 auto;padding:0 12px}
+section{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:14px 0}
+h2{font-size:1.15rem;font-weight:700;margin-bottom:10px}
+.row{display:flex;gap:18px;flex-wrap:wrap;align-items:baseline}
+.big{font-size:3rem;font-weight:800;line-height:1;letter-spacing:-.03em}
+.lbl{color:var(--muted);font-size:.85rem}
+.stat{min-width:120px}
+.stat b{font-family:'Bricolage Grotesque',sans-serif;font-size:1.5rem;display:block}
+.msg{margin:8px 0;font-size:.95rem}
+.alert{border-left:4px solid var(--warn);padding:6px 10px;margin:6px 0;background:color-mix(in srgb,var(--warn) 10%,transparent);border-radius:4px}
+.good{border-left-color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent)}
+svg{width:100%;height:auto;display:block;margin-top:10px}
+svg text{fill:var(--muted);font-size:11px;font-family:'Public Sans',sans-serif}
+.days{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px}
+.day{flex:0 0 92px;border:1px solid var(--line);border-radius:10px;padding:8px;text-align:center;font-size:.85rem}
+.day b{display:block;font-size:.95rem}.day .t{font-size:1.05rem;font-weight:600}
+.rain{color:var(--water);font-weight:600}
+small{color:var(--muted)}
+.leaflet-container{font-family:inherit}
+</style>
+</head>
+<body>
+<header>
+  <h1>Patel Khet</h1>
+  <p id="meta">Loading field…</p>
+</header>
+<div class="wrap"><div id="map"></div>
+
+<section id="crop">
+  <h2>Crop health</h2>
+  <div class="row"><div><div class="big" id="ndvi">–</div><div class="lbl">NDVI (greenness)</div></div>
+  <div class="stat"><b id="ndviword">–</b><span class="lbl" id="ndvidate">checking satellite…</span></div>
+  <div class="stat"><b id="ndvichg">–</b><span class="lbl">vs previous clear pass</span></div></div>
+  <div class="msg" id="satmsg"></div>
+  <div id="ndviChart"></div>
+  <small>Sentinel-2 satellite, 10 m resolution, a new picture roughly every 5 days. Cloudy passes are skipped. NDVI: under 0.2 bare soil, 0.2–0.4 young or sparse crop, 0.4–0.6 growing, above 0.6 dense and healthy. A steady drop in a growing crop is the thing to watch.</small>
+</section>
+
+<section id="water">
+  <h2>Water</h2>
+  <div class="row">
+    <div class="stat"><b id="soil">–</b><span class="lbl" id="soilword">soil moisture (top 9 cm)</span></div>
+    <div class="stat"><b id="ndmi">–</b><span class="lbl">crop water (NDMI)</span></div>
+    <div class="stat"><b id="pond">–</b><span class="lbl">standing water in field</span></div>
+    <div class="stat"><b id="bal">–</b><span class="lbl">7-day rain minus evaporation</span></div>
+  </div>
+  <div id="soilChart"></div>
+  <small>Soil moisture is a weather-model estimate for this spot, not a sensor reading. Rough guide: below 15% dry, 15–30% fine, above 40% waterlogged. NDMI higher means the crop holds more water. Standing water is detected from the satellite.</small>
+</section>
+
+<section id="wx">
+  <h2>Coming weather</h2>
+  <div id="alerts"></div>
+  <div class="days" id="days"></div>
+  <small>Forecast from Open-Meteo. Rain is in mm.</small>
+</section>
+<p style="text-align:center"><small>Boundary comes from field.kml. Free data, no accounts needed.</small></p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/proj4@2.9.2/dist/proj4.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+<script>
+// ---- Field boundary (lon, lat) – from patel_khet.kml. To track another field, replace these points (or edit via KML). ----
+const FIELD=[[80.01677090017274,21.95012807486817],[80.016601025157,21.94912595256395],[80.01635592690495,21.94912789904719],[80.01627777971977,21.94896924820364],[80.01671532305289,21.94862415095917],[80.01675533547453,21.94872267631935],[80.01729733450065,21.94859674014764],[80.01758617696628,21.94857194855272],[80.01763204796893,21.94895436781351],[80.0177303143071,21.94946975721687],[80.0177545161295,21.9496755602321],[80.01778098366589,21.94992078100757],[80.01778040356027,21.95015707211033],[80.01772627244105,21.95023236684678]];
+const LOOKBACK_DAYS=200, MAX_CLOUD=0.25;
+const $=id=>document.getElementById(id);
+const latlngs=FIELD.map(c=>[c[1],c[0]]);
+const cen=FIELD.reduce((a,c)=>[a[0]+c[0]/FIELD.length,a[1]+c[1]/FIELD.length],[0,0]);
+
+// ---- Map ----
+const map=L.map('map',{zoomControl:true});
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Imagery © Esri'}).addTo(map);
+const poly=L.polygon(latlngs,{color:'#fff',weight:3,fillColor:'#888',fillOpacity:.45}).addTo(map);
+map.fitBounds(poly.getBounds(),{padding:[30,30]});
+
+// ---- Helpers ----
+const zone=Math.floor((cen[0]+180)/6)+1;
+const utmDef=z=>`+proj=utm +zone=${z} +datum=WGS84 +units=m +no_defs`;
+function ndviColor(v){const s=[[0,[168,121,74]],[.2,[217,184,74]],[.4,[156,194,74]],[.6,[63,156,60]],[.85,[27,107,47]]];
+  if(v<=s[0][0])return`rgb(${s[0][1]})`;for(let i=1;i<s.length;i++)if(v<=s[i][0]){const[a,A]=s[i-1],[b,B]=s[i],t=(v-a)/(b-a);return`rgb(${A.map((x,k)=>Math.round(x+(B[k]-x)*t))})`}return`rgb(${s[s.length-1][1]})`}
+function inPoly(x,y,p){let c=false;for(let i=0,j=p.length-1;i<p.length;j=i++){if((p[i][1]>y)!=(p[j][1]>y)&&x<(p[j][0]-p[i][0])*(y-p[i][1])/(p[j][1]-p[i][1])+p[i][0])c=!c}return c}
+const mean=a=>a.length?a.reduce((s,v)=>s+v,0)/a.length:NaN;
+const fmtD=d=>new Date(d+'T00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+
+// area
+(()=>{const u=FIELD.map(c=>proj4('EPSG:4326',utmDef(zone),c));let a=0;for(let i=0;i<u.length;i++){const j=(i+1)%u.length;a+=u[i][0]*u[j][1]-u[j][0]*u[i][1]}a=Math.abs(a)/2;
+$('meta').textContent=`${(a/10000).toFixed(2)} ha (${(a/4046.86).toFixed(2)} acres) · ${cen[1].toFixed(4)}°N, ${cen[0].toFixed(4)}°E`})();
+
+// ---- Chart ----
+function chart(el,pts,o={}){
+  if(pts.length<2){el.innerHTML='';return}
+  const W=640,H=190,p={l:40,r:10,t:10,b:22};
+  const xs=pts.map(q=>q.x),ys=pts.map(q=>q.y);
+  const x0=Math.min(...xs),x1=Math.max(...xs);
+  let y0=o.min??Math.min(...ys),y1=o.max??Math.max(...ys);if(y1-y0<1e-6){y1+=.1}
+  const X=x=>p.l+(x-x0)/(x1-x0||1)*(W-p.l-p.r),Y=y=>H-p.b-(y-y0)/(y1-y0)*(H-p.t-p.b);
+  const f=o.fmt||(v=>v.toFixed(2));
+  let g='';[y0,(y0+y1)/2,y1].forEach(v=>{g+=`<line x1="${p.l}" x2="${W-p.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${p.l-5}" y="${Y(v)+4}" text-anchor="end">${f(v)}</text>`});
+  const d=pts.map((q,i)=>(i?'L':'M')+X(q.x).toFixed(1)+' '+Y(q.y).toFixed(1)).join('');
+  const dt=x=>new Date(x).toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+  let mk='';if(o.mark&&o.mark>x0&&o.mark<x1)mk=`<line x1="${X(o.mark)}" x2="${X(o.mark)}" y1="${p.t}" y2="${H-p.b}" stroke="var(--muted)" stroke-dasharray="4 3"/><text x="${X(o.mark)+4}" y="${p.t+10}">today</text>`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${o.label||'chart'}">${g}${mk}<path d="${d}" fill="none" stroke="${o.color}" stroke-width="2.5" stroke-linejoin="round"/>${o.dots?pts.map(q=>`<circle cx="${X(q.x)}" cy="${Y(q.y)}" r="3.5" fill="${o.color}"/>`).join(''):''}<text x="${p.l}" y="${H-5}">${dt(x0)}</text><text x="${W-p.r}" y="${H-5}" text-anchor="end">${dt(x1)}</text></svg>`;
+}
+
+// ---- Weather & soil moisture (Open-Meteo, no key) ----
+const WMO=c=>c===0?'Clear':c<=2?'Part cloudy':c===3?'Overcast':c<=48?'Fog':c<=57?'Drizzle':c<=67?'Rain':c<=77?'Snow':c<=82?'Showers':c<=86?'Snow showers':'Thunder-storm';
+async function weather(){
+  const u=`https://api.open-meteo.com/v1/forecast?latitude=${cen[1]}&longitude=${cen[0]}&timezone=auto&past_days=14&forecast_days=7`+
+   `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,et0_fao_evapotranspiration,wind_speed_10m_max`+
+   `&hourly=soil_moisture_0_to_1cm,soil_moisture_1_to_3cm,soil_moisture_3_to_9cm`;
+  const r=await fetch(u);if(!r.ok)throw new Error('weather '+r.status);const w=await r.json();
+  const D=w.daily,N=14; // index of today
+  // soil moisture: daily mean of three layers
+  const H=w.hourly,sm=[];
+  D.time.forEach((day,i)=>{const v=[];for(let h=i*24;h<i*24+24;h++){const a=[H.soil_moisture_0_to_1cm[h],H.soil_moisture_1_to_3cm[h],H.soil_moisture_3_to_9cm[h]].filter(x=>x!=null);if(a.length)v.push(mean(a))}if(v.length)sm.push({x:new Date(day+'T12:00').getTime(),y:mean(v)*100})});
+  const todaySm=sm[N]?sm[N].y:sm[sm.length-1].y;
+  $('soil').textContent=todaySm.toFixed(0)+'%';
+  $('soilword').textContent='soil moisture – '+(todaySm<15?'dry':todaySm<30?'fine':todaySm<40?'wet':'waterlogged');
+  chart($('soilChart'),sm,{color:'var(--water)',fmt:v=>v.toFixed(0)+'%',mark:new Date(D.time[N]+'T12:00').getTime(),label:'Soil moisture, past 14 days and forecast'});
+  const rain7=D.precipitation_sum.slice(N).reduce((s,v)=>s+(v||0),0),et7=D.et0_fao_evapotranspiration.slice(N).reduce((s,v)=>s+(v||0),0);
+  $('bal').textContent=(rain7-et7>0?'+':'')+(rain7-et7).toFixed(0)+' mm';
+  // strip
+  $('days').innerHTML=D.time.slice(N).map((t,k)=>{const i=N+k;return`<div class="day"><b>${k?new Date(t+'T00:00').toLocaleDateString('en-IN',{weekday:'short'}):'Today'}</b>${WMO(D.weather_code[i])}<div class="t">${Math.round(D.temperature_2m_max[i])}° <small>${Math.round(D.temperature_2m_min[i])}°</small></div><div class="rain">${(D.precipitation_sum[i]||0).toFixed(0)} mm</div><small>${D.precipitation_probability_max[i]??'–'}% chance</small></div>`}).join('');
+  // alerts
+  const A=[],f=D.time.slice(N);
+  f.forEach((t,k)=>{const i=N+k,d=k?new Date(t+'T00:00').toLocaleDateString('en-IN',{weekday:'long'}):'Today';
+    if(D.precipitation_sum[i]>=40)A.push(`Heavy rain ${d}: about ${Math.round(D.precipitation_sum[i])} mm. Check drainage and hold off on spraying or fertiliser.`);
+    if(D.temperature_2m_max[i]>=42)A.push(`Extreme heat ${d}: ${Math.round(D.temperature_2m_max[i])}°C.`);
+    if(D.temperature_2m_min[i]<=4)A.push(`Cold night ${d}: ${Math.round(D.temperature_2m_min[i])}°C, frost risk for tender crops.`);
+    if(D.wind_speed_10m_max[i]>=40)A.push(`Strong wind ${d}: up to ${Math.round(D.wind_speed_10m_max[i])} km/h.`)});
+  if(rain7<3&&todaySm<20)A.push('Dry week ahead and soil is already on the dry side. Plan irrigation.');
+  $('alerts').innerHTML=A.length?A.map(a=>`<div class="alert">${a}</div>`).join(''):'<div class="alert good">Nothing risky in the next 7 days.</div>';
+}
+
+// ---- Satellite (Sentinel-2 L2A via Earth Search STAC + COG, no key) ----
+async function readPix(href,P,bb){
+  const img=await(await GeoTIFF.fromUrl(href)).getImage();
+  const[ox,oy]=img.getOrigin(),[rx,ry]=img.getResolution();
+  const x0=Math.max(0,Math.floor((bb[0]-ox)/rx)),x1=Math.min(img.getWidth(),Math.ceil((bb[2]-ox)/rx));
+  const y0=Math.max(0,Math.floor((bb[3]-oy)/ry)),y1=Math.min(img.getHeight(),Math.ceil((bb[1]-oy)/ry));
+  if(x1<=x0||y1<=y0)return[];
+  const r=await img.readRasters({window:[x0,y0,x1,y1]}),w=x1-x0,ins=[],all=[];
+  for(let j=0;j<y1-y0;j++)for(let i=0;i<w;i++){const v=r[0][j*w+i];all.push(v);if(inPoly(ox+(x0+i+.5)*rx,oy+(y0+j+.5)*ry,P))ins.push(v)}
+  return ins.length?ins:all;
+}
+async function scene(it){
+  const z=(it.properties['proj:epsg']||parseInt((it.properties['proj:code']||'').split(':')[1])||32600+zone)-32600;
+  const P=FIELD.map(c=>proj4('EPSG:4326',utmDef(z),c)),xs=P.map(p=>p[0]),ys=P.map(p=>p[1]);
+  const bb=[Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)],A=it.assets;
+  const scl=await readPix(A.scl.href,P,bb);if(!scl.length)return null;
+  const bad=scl.filter(v=>[0,3,8,9,10,11].includes(v)).length/scl.length;if(bad>MAX_CLOUD)return null;
+  const[R,N,G,S]=await Promise.all(['red','nir','green','swir16'].map(k=>readPix(A[k].href,P,bb)));
+  const sc=k=>{const b=A[k]['raster:bands']?.[0];const s=b?.scale??1e-4,o=b?.offset??-.1;return v=>v*s+o};
+  const fr=sc('red'),fn=sc('nir'),fg=sc('green'),fs=sc('swir16');
+  const n=Math.min(R.length,N.length,G.length),nd=[],wt=[];
+  for(let i=0;i<n;i++){const r=fr(R[i]),nr=fn(N[i]),g=fg(G[i]);if(nr+r>0)nd.push((nr-r)/(nr+r));if(g+nr>0)wt.push((g-nr)/(g+nr)>0.1?1:0)}
+  const nr=mean(N.map(fn)),sw=mean(S.map(fs));
+  return{date:it.properties.datetime.slice(0,10),ndvi:mean(nd),ndmi:(nr-sw)/(nr+sw),pond:mean(wt)};
+}
+async function satellite(){
+  const end=new Date(),start=new Date(end-LOOKBACK_DAYS*864e5);
+  const r=await fetch('https://earth-search.aws.element84.com/v1/search',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({collections:['sentinel-2-l2a'],intersects:{type:'Polygon',coordinates:[[...FIELD,FIELD[0]]]},datetime:start.toISOString().slice(0,10)+'T00:00:00Z/'+end.toISOString().slice(0,10)+'T23:59:59Z',limit:100,query:{'eo:cloud_cover':{lt:70}}})});
+  if(!r.ok)throw new Error('STAC '+r.status);
+  const items=(await r.json()).features.sort((a,b)=>a.properties.datetime<b.properties.datetime?-1:1);
+  const out=[],seen=new Set();
+  for(let i=0;i<items.length;i+=4){
+    $('satmsg').textContent=`Reading satellite scenes… ${Math.min(i+4,items.length)} of ${items.length}`;
+    const res=await Promise.all(items.slice(i,i+4).map(it=>scene(it).catch(()=>null)));
+    res.forEach(s=>{if(s&&!seen.has(s.date)&&isFinite(s.ndvi)){seen.add(s.date);out.push(s)}});
+  }
+  $('satmsg').textContent='';
+  if(!out.length){$('ndvidate').textContent='no clear pass found';$('satmsg').textContent='Every recent satellite picture was too cloudy over the field. This is common in monsoon. Check again in a few days.';return}
+  const L=out[out.length-1],P=out[out.length-2];
+  $('ndvi').textContent=L.ndvi.toFixed(2);
+  $('ndviword').textContent=L.ndvi<.2?'Bare / very sparse':L.ndvi<.4?'Young or sparse':L.ndvi<.6?'Growing':'Dense, healthy';
+  $('ndvidate').textContent='picture from '+fmtD(L.date);
+  $('ndvichg').textContent=P?((L.ndvi-P.ndvi>=0?'+':'')+(L.ndvi-P.ndvi).toFixed(2)):'–';
+  $('ndmi').textContent=L.ndmi.toFixed(2);
+  $('pond').textContent=Math.round(L.pond*100)+'%';
+  poly.setStyle({fillColor:ndviColor(L.ndvi),fillOpacity:.6});
+  poly.bindTooltip(`NDVI ${L.ndvi.toFixed(2)} · ${fmtD(L.date)}`,{permanent:true,direction:'center'});
+  const t=s=>new Date(s.date+'T12:00').getTime();
+  chart($('ndviChart'),out.map(s=>({x:t(s),y:s.ndvi})),{color:'var(--ok)',min:0,max:Math.max(.8,...out.map(s=>s.ndvi)),dots:true,label:'NDVI over time'});
+}
+weather().catch(e=>{$('alerts').innerHTML='<div class="alert">Could not load weather ('+e.message+'). Check your connection and refresh.</div>'});
+satellite().catch(e=>{$('ndvidate').textContent='satellite data unavailable';$('satmsg').textContent='Could not load satellite data ('+e.message+'). Refresh to retry.'});
+</script>
+</body>
+</html>
