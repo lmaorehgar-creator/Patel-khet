@@ -34,15 +34,36 @@ svg text{fill:var(--muted);font-size:11px;font-family:'Public Sans',sans-serif}
 .day b{display:block;font-size:.95rem}.day .t{font-size:1.05rem;font-weight:600}
 .rain{color:var(--water);font-weight:600}
 small{color:var(--muted)}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px}
+#shape{width:84px;height:84px;flex:none;margin:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.tile{border:1px solid var(--line);border-radius:12px;padding:10px 10px 12px;text-align:center;background:var(--bg)}
+.tile h3{margin:0;font:600 .85rem 'Public Sans',sans-serif;color:var(--muted)}
+.tile svg.g{margin:4px auto 0;max-width:150px}
+.tile .v{font:800 1.6rem/1 'Bricolage Grotesque',sans-serif;margin-top:-6px}
+.tile .w{font-size:.85rem;font-weight:600;margin-top:4px}
+.tile .n{font-size:.75rem;color:var(--muted)}
+.tile.off .v,.tile.off .w{color:var(--muted)}
+#verdict{font-size:1.05rem;font-weight:600;margin-bottom:12px}
+#banner{display:none}
 .leaflet-container{font-family:inherit}
 </style>
 </head>
 <body>
 <header>
-  <h1>Patel Khet</h1>
-  <p id="meta">Loading field…</p>
+  <div><h1>Patel Khet</h1>
+  <p id="meta">Loading field…</p></div>
+  <svg id="shape" viewBox="0 0 100 100" aria-label="Field outline"></svg>
 </header>
 <div class="wrap"><div id="map"></div>
+<p class="lbl" id="iso" style="margin:8px 4px 0">Yellow line = your field boundary from field.kml. Everything outside it is dimmed and left out of the satellite numbers.</p>
+
+<section id="status">
+  <h2>Field status</h2>
+  <div id="verdict">Checking your field…</div>
+  <div class="alert" id="banner">Live data could not load in this view. The Claude app preview blocks internet access. Open the page from GitHub Pages, or open the downloaded index.html in your phone's browser, and it fills in by itself.</div>
+  <div class="tiles" id="tiles"></div>
+</section>
 
 <section id="crop">
   <h2>Crop health</h2>
@@ -70,7 +91,7 @@ small{color:var(--muted)}
   <h2>Coming weather</h2>
   <div id="alerts"></div>
   <div class="days" id="days"></div>
-  <small>Forecast from Open-Meteo. Rain is in mm.</small>
+  <small>Forecast from Open-Meteo. Rain is in mm. Weather and soil moisture come from a weather model, so they describe the area around your field (about a 1 to 10 km grid square), not your field alone. Only the satellite numbers are cut to your exact boundary.</small>
 </section>
 <p style="text-align:center"><small>Boundary comes from field.kml. Free data, no accounts needed.</small></p>
 </div>
@@ -87,10 +108,16 @@ const latlngs=FIELD.map(c=>[c[1],c[0]]);
 const cen=FIELD.reduce((a,c)=>[a[0]+c[0]/FIELD.length,a[1]+c[1]/FIELD.length],[0,0]);
 
 // ---- Map ----
-const map=L.map('map',{zoomControl:true});
+const map=L.map('map',{zoomControl:true,maxZoom:19});
 L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Imagery © Esri'}).addTo(map);
-const poly=L.polygon(latlngs,{color:'#fff',weight:3,fillColor:'#888',fillOpacity:.45}).addTo(map);
-map.fitBounds(poly.getBounds(),{padding:[30,30]});
+const dim=L.polygon([[[-85,-180],[-85,180],[85,180],[85,-180]],latlngs],{stroke:false,fillColor:'#000',fillOpacity:.5,interactive:false}).addTo(map);
+const poly=L.polygon(latlngs,{color:'#ffd400',weight:4,fillColor:'#ffd400',fillOpacity:.12}).addTo(map);
+let pxLayer;
+function drawPx(s){if(pxLayer)map.removeLayer(pxLayer);const h=s.res/2,inv=p=>{const q=proj4(utmDef(s.z),'EPSG:4326',p);return[q[1],q[0]]};
+  pxLayer=L.layerGroup(s.px.map(p=>L.polygon([[p.x-h,p.y-h],[p.x+h,p.y-h],[p.x+h,p.y+h],[p.x-h,p.y+h]].map(inv),{color:'#fff',weight:1,opacity:.6,fillColor:ndviColor(p.v),fillOpacity:.8,interactive:false}))).addTo(map);
+  poly.setStyle({fillOpacity:0});poly.bringToFront();
+  $('iso').textContent=`Satellite numbers use only the ${s.px.length} ten-metre squares shown on the map (${(s.px.length*s.res*s.res).toFixed(0)} m² of your ${AREA.toFixed(0)} m²). Each has its centre inside the yellow boundary and at least 5 m from its edge, so neighbouring land is left out.`}
+const fit=()=>{map.invalidateSize();map.fitBounds(poly.getBounds(),{padding:[30,30],maxZoom:19})};fit();setTimeout(()=>{fit();map.setMaxBounds(poly.getBounds().pad(4));map.setMinZoom(Math.max(1,map.getZoom()-3))},450);window.addEventListener('resize',fit);
 
 // ---- Helpers ----
 const zone=Math.floor((cen[0]+180)/6)+1;
@@ -102,7 +129,7 @@ const mean=a=>a.length?a.reduce((s,v)=>s+v,0)/a.length:NaN;
 const fmtD=d=>new Date(d+'T00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short'});
 
 // area
-(()=>{const u=FIELD.map(c=>proj4('EPSG:4326',utmDef(zone),c));let a=0;for(let i=0;i<u.length;i++){const j=(i+1)%u.length;a+=u[i][0]*u[j][1]-u[j][0]*u[i][1]}a=Math.abs(a)/2;
+let AREA=0;(()=>{const u=FIELD.map(c=>proj4('EPSG:4326',utmDef(zone),c));let a=0;for(let i=0;i<u.length;i++){const j=(i+1)%u.length;a+=u[i][0]*u[j][1]-u[j][0]*u[i][1]}a=Math.abs(a)/2;AREA=a;
 $('meta').textContent=`${(a/10000).toFixed(2)} ha (${(a/4046.86).toFixed(2)} acres) · ${cen[1].toFixed(4)}°N, ${cen[0].toFixed(4)}°E`})();
 
 // ---- Chart ----
@@ -121,6 +148,43 @@ function chart(el,pts,o={}){
   el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${o.label||'chart'}">${g}${mk}<path d="${d}" fill="none" stroke="${o.color}" stroke-width="2.5" stroke-linejoin="round"/>${o.dots?pts.map(q=>`<circle cx="${X(q.x)}" cy="${Y(q.y)}" r="3.5" fill="${o.color}"/>`).join(''):''}<text x="${p.l}" y="${H-5}">${dt(x0)}</text><text x="${W-p.r}" y="${H-5}" text-anchor="end">${dt(x1)}</text></svg>`;
 }
 
+// ---- Field status dashboard ----
+const S={},errs=[];
+const C={bad:'#b0502a',warn:'#d9a52e',ok:'#3f9c3c',hi:'#1b6b2f',w1:'#7bbbe0',w2:'#2a7ab0',w3:'#1d4f7a'};
+function shape(col){const xs=FIELD.map(c=>c[0]),ys=FIELD.map(c=>c[1]),x0=Math.min(...xs),y0=Math.min(...ys),k=Math.max(Math.max(...xs)-x0,Math.max(...ys)-y0);
+  const pts=FIELD.map(c=>[8+(c[0]-x0)/k*84,92-(c[1]-y0)/k*84].map(n=>n.toFixed(1)).join(',')).join(' ');
+  $('shape').innerHTML=`<polygon points="${pts}" fill="${col}" fill-opacity=".75" stroke="var(--ink)" stroke-width="2.5" stroke-linejoin="round"/>`}
+shape('#9aa89d');
+function gauge(v,min,max,bands){const pt=(f,r)=>{const a=Math.PI*(1-f);return[60+r*Math.cos(a),60-r*Math.sin(a)]},F=x=>Math.min(1,Math.max(0,(x-min)/(max-min)));
+  let g=bands.map(([a,b,c])=>{const p=pt(F(a),46),q=pt(F(b),46);return`<path d="M${p[0].toFixed(1)} ${p[1].toFixed(1)}A46 46 0 0 1 ${q[0].toFixed(1)} ${q[1].toFixed(1)}" fill="none" stroke="${c}" stroke-width="10"${v==null?' opacity=".3"':''}/>`}).join('');
+  if(v!=null){const n=pt(F(v),36);g+=`<line x1="60" y1="60" x2="${n[0].toFixed(1)}" y2="${n[1].toFixed(1)}" stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/><circle cx="60" cy="60" r="5" fill="var(--ink)"/>`}
+  return`<svg class="g" viewBox="0 0 120 66" aria-hidden="true">${g}</svg>`}
+function tile(title,v,txt,word,note,min,max,bands){return`<div class="tile${v==null?' off':''}"><h3>${title}</h3>${gauge(v,min,max,bands)}<div class="v">${v==null?'–':txt}</div><div class="w">${v==null?'waiting for data':word}</div><div class="n">${note}</div></div>`}
+function render(){
+  const T=[],bad=[];
+  const nd=S.ndvi,nm=S.ndmi,so=S.soil,po=S.pond,ra=S.rain7,tx=S.tmax;
+  T.push(tile('Crop greenness',nd,nd==null?'':nd.toFixed(2),nd==null?'':nd<.2?'Bare or very sparse':nd<.4?'Young or sparse':nd<.6?'Growing well':'Dense and healthy','NDVI from satellite',0,.9,[[0,.2,C.bad],[.2,.4,C.warn],[.4,.6,C.ok],[.6,.9,C.hi]]));
+  T.push(tile('Crop water',nm,nm==null?'':nm.toFixed(2),nm==null?'':nm<0?'Water stressed':nm<.15?'Moderate':'Well watered','NDMI from satellite',-.2,.6,[[-.2,0,C.bad],[0,.15,C.warn],[.15,.6,C.w2]]));
+  T.push(tile('Soil moisture',so,so==null?'':so.toFixed(0)+'%',so==null?'':so<15?'Dry':so<30?'Good':so<40?'Wet':'Waterlogged','top 9 cm, model estimate',0,50,[[0,15,C.bad],[15,30,C.ok],[30,40,C.w1],[40,50,C.w3]]));
+  T.push(tile('Standing water',po==null?null:po*100,po==null?'':Math.round(po*100)+'%',po==null?'':po<.1?'None':po<.5?'Patches':'Flooded','of field, satellite',0,100,[[0,10,C.ok],[10,50,C.w1],[50,100,C.w3]]));
+  T.push(tile('Rain, next 7 days',ra,ra==null?'':ra.toFixed(0)+' mm',ra==null?'':ra<3?'Dry week':ra<40?'Some rain':ra<100?'Wet week':'Very heavy','balance '+(S.bal==null?'–':(S.bal>0?'+':'')+S.bal.toFixed(0)+' mm vs evaporation'),0,120,[[0,3,C.bad],[3,40,C.w1],[40,100,C.w2],[100,120,C.w3]]));
+  T.push(tile('Hottest day, next 7',tx,tx==null?'':Math.round(tx)+'°C',tx==null?'':tx<35?'Comfortable':tx<42?'Hot':'Extreme heat','forecast high',10,50,[[10,35,C.ok],[35,42,C.warn],[42,50,C.bad]]));
+  $('tiles').innerHTML=T.join('');
+  if(nd!=null&&S.drop!=null&&S.drop<=-.1)bad.push('crop greenness fell since the last pass');
+  if(nd!=null&&nd<.2&&S.ndviMax>.4)bad.push('crop greenness is low');
+  if(nm!=null&&nm<0)bad.push('crop looks water stressed');
+  if(so!=null&&so<15)bad.push('soil is dry');
+  if(so!=null&&so>=40)bad.push('soil is waterlogged');
+  if(po!=null&&po>=.5)bad.push('field has heavy standing water');
+  if(ra!=null&&ra>=100)bad.push('very heavy rain coming');
+  if(tx!=null&&tx>=42)bad.push('extreme heat coming');
+  const have=[nd,nm,so,po,ra,tx].filter(x=>x!=null).length;
+  $('verdict').textContent=!have?'Waiting for data…':bad.length?'Needs attention: '+bad.join('; ')+'.':'All indicators look fine'+(have<6?' so far ('+have+' of 6 loaded).':'.');
+  $('verdict').style.color=bad.length?'var(--warn)':have?'var(--ok)':'var(--muted)';
+}
+render();
+function failed(e){errs.push(e);if(errs.length>=2)$('banner').style.display='block'}
+
 // ---- Weather & soil moisture (Open-Meteo, no key) ----
 const WMO=c=>c===0?'Clear':c<=2?'Part cloudy':c===3?'Overcast':c<=48?'Fog':c<=57?'Drizzle':c<=67?'Rain':c<=77?'Snow':c<=82?'Showers':c<=86?'Snow showers':'Thunder-storm';
 async function weather(){
@@ -137,6 +201,7 @@ async function weather(){
   $('soilword').textContent='soil moisture – '+(todaySm<15?'dry':todaySm<30?'fine':todaySm<40?'wet':'waterlogged');
   chart($('soilChart'),sm,{color:'var(--water)',fmt:v=>v.toFixed(0)+'%',mark:new Date(D.time[N]+'T12:00').getTime(),label:'Soil moisture, past 14 days and forecast'});
   const rain7=D.precipitation_sum.slice(N).reduce((s,v)=>s+(v||0),0),et7=D.et0_fao_evapotranspiration.slice(N).reduce((s,v)=>s+(v||0),0);
+  S.soil=todaySm;S.rain7=rain7;S.bal=rain7-et7;S.tmax=Math.max(...D.temperature_2m_max.slice(N));render();
   $('bal').textContent=(rain7-et7>0?'+':'')+(rain7-et7).toFixed(0)+' mm';
   // strip
   $('days').innerHTML=D.time.slice(N).map((t,k)=>{const i=N+k;return`<div class="day"><b>${k?new Date(t+'T00:00').toLocaleDateString('en-IN',{weekday:'short'}):'Today'}</b>${WMO(D.weather_code[i])}<div class="t">${Math.round(D.temperature_2m_max[i])}° <small>${Math.round(D.temperature_2m_min[i])}°</small></div><div class="rain">${(D.precipitation_sum[i]||0).toFixed(0)} mm</div><small>${D.precipitation_probability_max[i]??'–'}% chance</small></div>`}).join('');
@@ -152,29 +217,35 @@ async function weather(){
 }
 
 // ---- Satellite (Sentinel-2 L2A via Earth Search STAC + COG, no key) ----
-async function readPix(href,P,bb){
+function dseg(x,y,a,b){const dx=b[0]-a[0],dy=b[1]-a[1],t=Math.max(0,Math.min(1,((x-a[0])*dx+(y-a[1])*dy)/(dx*dx+dy*dy||1)));return Math.hypot(x-a[0]-t*dx,y-a[1]-t*dy)}
+const dPoly=(x,y,p)=>Math.min(...p.map((q,i)=>dseg(x,y,q,p[(i+1)%p.length])));
+// Reads one band, keeps ONLY pixels inside the field (centre inside boundary and >= buf metres from the edge).
+async function readPix(href,P,bb,buf){
   const img=await(await GeoTIFF.fromUrl(href)).getImage();
   const[ox,oy]=img.getOrigin(),[rx,ry]=img.getResolution();
   const x0=Math.max(0,Math.floor((bb[0]-ox)/rx)),x1=Math.min(img.getWidth(),Math.ceil((bb[2]-ox)/rx));
   const y0=Math.max(0,Math.floor((bb[3]-oy)/ry)),y1=Math.min(img.getHeight(),Math.ceil((bb[1]-oy)/ry));
   if(x1<=x0||y1<=y0)return[];
-  const r=await img.readRasters({window:[x0,y0,x1,y1]}),w=x1-x0,ins=[],all=[];
-  for(let j=0;j<y1-y0;j++)for(let i=0;i<w;i++){const v=r[0][j*w+i];all.push(v);if(inPoly(ox+(x0+i+.5)*rx,oy+(y0+j+.5)*ry,P))ins.push(v)}
-  return ins.length?ins:all;
+  const r=await img.readRasters({window:[x0,y0,x1,y1]}),w=x1-x0,cand=[];
+  for(let j=0;j<y1-y0;j++)for(let i=0;i<w;i++){const x=ox+(x0+i+.5)*rx,y=oy+(y0+j+.5)*ry;cand.push({v:r[0][j*w+i],x,y,res:Math.abs(rx),inn:inPoly(x,y,P)})}
+  let sel=cand.filter(c=>c.inn&&dPoly(c.x,c.y,P)>=buf);
+  if(sel.length<3)sel=cand.filter(c=>c.inn);
+  if(!sel.length){const cx=mean(P.map(p=>p[0])),cy=mean(P.map(p=>p[1]));sel=[cand.reduce((m,c)=>Math.hypot(c.x-cx,c.y-cy)<Math.hypot(m.x-cx,m.y-cy)?c:m)]}
+  return sel;
 }
 async function scene(it){
   const z=(it.properties['proj:epsg']||parseInt((it.properties['proj:code']||'').split(':')[1])||32600+zone)-32600;
   const P=FIELD.map(c=>proj4('EPSG:4326',utmDef(z),c)),xs=P.map(p=>p[0]),ys=P.map(p=>p[1]);
   const bb=[Math.min(...xs),Math.min(...ys),Math.max(...xs),Math.max(...ys)],A=it.assets;
-  const scl=await readPix(A.scl.href,P,bb);if(!scl.length)return null;
+  const scl=(await readPix(A.scl.href,P,bb,0)).map(c=>c.v);if(!scl.length)return null;
   const bad=scl.filter(v=>[0,3,8,9,10,11].includes(v)).length/scl.length;if(bad>MAX_CLOUD)return null;
-  const[R,N,G,S]=await Promise.all(['red','nir','green','swir16'].map(k=>readPix(A[k].href,P,bb)));
+  const[R,N,G,S]=await Promise.all(['red','nir','green','swir16'].map(k=>readPix(A[k].href,P,bb,5)));
   const sc=k=>{const b=A[k]['raster:bands']?.[0];const s=b?.scale??1e-4,o=b?.offset??-.1;return v=>v*s+o};
   const fr=sc('red'),fn=sc('nir'),fg=sc('green'),fs=sc('swir16');
-  const n=Math.min(R.length,N.length,G.length),nd=[],wt=[];
-  for(let i=0;i<n;i++){const r=fr(R[i]),nr=fn(N[i]),g=fg(G[i]);if(nr+r>0)nd.push((nr-r)/(nr+r));if(g+nr>0)wt.push((g-nr)/(g+nr)>0.1?1:0)}
-  const nr=mean(N.map(fn)),sw=mean(S.map(fs));
-  return{date:it.properties.datetime.slice(0,10),ndvi:mean(nd),ndmi:(nr-sw)/(nr+sw),pond:mean(wt)};
+  const n=Math.min(R.length,N.length,G.length),px=[],wt=[];
+  for(let i=0;i<n;i++){const r=fr(R[i].v),nr=fn(N[i].v),g=fg(G[i].v);if(nr+r>0)px.push({x:R[i].x,y:R[i].y,v:(nr-r)/(nr+r)});if(g+nr>0)wt.push((g-nr)/(g+nr)>0.1?1:0)}
+  const nr=mean(N.map(c=>fn(c.v))),sw=mean(S.map(c=>fs(c.v)));
+  return{date:it.properties.datetime.slice(0,10),ndvi:mean(px.map(p=>p.v)),ndmi:(nr-sw)/(nr+sw),pond:mean(wt),px,z,res:R[0].res};
 }
 async function satellite(){
   const end=new Date(),start=new Date(end-LOOKBACK_DAYS*864e5);
@@ -197,13 +268,14 @@ async function satellite(){
   $('ndvichg').textContent=P?((L.ndvi-P.ndvi>=0?'+':'')+(L.ndvi-P.ndvi).toFixed(2)):'–';
   $('ndmi').textContent=L.ndmi.toFixed(2);
   $('pond').textContent=Math.round(L.pond*100)+'%';
-  poly.setStyle({fillColor:ndviColor(L.ndvi),fillOpacity:.6});
+  S.ndvi=L.ndvi;S.ndmi=L.ndmi;S.pond=L.pond;S.drop=P?L.ndvi-P.ndvi:null;S.ndviMax=Math.max(...out.map(x=>x.ndvi));render();shape(ndviColor(L.ndvi));
+  drawPx(L);
   poly.bindTooltip(`NDVI ${L.ndvi.toFixed(2)} · ${fmtD(L.date)}`,{permanent:true,direction:'center'});
   const t=s=>new Date(s.date+'T12:00').getTime();
   chart($('ndviChart'),out.map(s=>({x:t(s),y:s.ndvi})),{color:'var(--ok)',min:0,max:Math.max(.8,...out.map(s=>s.ndvi)),dots:true,label:'NDVI over time'});
 }
-weather().catch(e=>{$('alerts').innerHTML='<div class="alert">Could not load weather ('+e.message+'). Check your connection and refresh.</div>'});
-satellite().catch(e=>{$('ndvidate').textContent='satellite data unavailable';$('satmsg').textContent='Could not load satellite data ('+e.message+'). Refresh to retry.'});
+weather().catch(e=>{failed(e);$('alerts').innerHTML='<div class="alert">Could not load weather ('+e.message+'). Check your connection and refresh.</div>'});
+satellite().catch(e=>{failed(e);$('ndvidate').textContent='satellite data unavailable';$('satmsg').textContent='Could not load satellite data ('+e.message+'). Refresh to retry.'});
 </script>
 </body>
 </html>
