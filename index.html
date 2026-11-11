@@ -46,6 +46,7 @@ header{display:flex;justify-content:space-between;align-items:center;gap:12px}
 .tile.off .v,.tile.off .w{color:var(--muted)}
 #verdict{font-size:1.05rem;font-weight:600;margin-bottom:12px}
 #banner{display:none}
+.leaflet-container svg{width:auto;height:auto;margin:0;display:inline}
 .leaflet-container{font-family:inherit}
 </style>
 </head>
@@ -247,20 +248,9 @@ async function scene(it){
   const nr=mean(N.map(c=>fn(c.v))),sw=mean(S.map(c=>fs(c.v)));
   return{date:it.properties.datetime.slice(0,10),ndvi:mean(px.map(p=>p.v)),ndmi:(nr-sw)/(nr+sw),pond:mean(wt),px,z,res:R[0].res};
 }
-async function satellite(){
-  const end=new Date(),start=new Date(end-LOOKBACK_DAYS*864e5);
-  const r=await fetch('https://earth-search.aws.element84.com/v1/search',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({collections:['sentinel-2-l2a'],intersects:{type:'Polygon',coordinates:[[...FIELD,FIELD[0]]]},datetime:start.toISOString().slice(0,10)+'T00:00:00Z/'+end.toISOString().slice(0,10)+'T23:59:59Z',limit:100,query:{'eo:cloud_cover':{lt:70}}})});
-  if(!r.ok)throw new Error('STAC '+r.status);
-  const items=(await r.json()).features.sort((a,b)=>a.properties.datetime<b.properties.datetime?-1:1);
-  const out=[],seen=new Set();
-  for(let i=0;i<items.length;i+=4){
-    $('satmsg').textContent=`Reading satellite scenes… ${Math.min(i+4,items.length)} of ${items.length}`;
-    const res=await Promise.all(items.slice(i,i+4).map(it=>scene(it).catch(()=>null)));
-    res.forEach(s=>{if(s&&!seen.has(s.date)&&isFinite(s.ndvi)){seen.add(s.date);out.push(s)}});
-  }
-  $('satmsg').textContent='';
-  if(!out.length){$('ndvidate').textContent='no clear pass found';$('satmsg').textContent='Every recent satellite picture was too cloudy over the field. This is common in monsoon. Check again in a few days.';return}
+let lastErr=null,satTries=0;
+function showSat(out){
+  out.sort((x,y)=>x.date<y.date?-1:1);
   const L=out[out.length-1],P=out[out.length-2];
   $('ndvi').textContent=L.ndvi.toFixed(2);
   $('ndviword').textContent=L.ndvi<.2?'Bare / very sparse':L.ndvi<.4?'Young or sparse':L.ndvi<.6?'Growing':'Dense, healthy';
@@ -270,9 +260,31 @@ async function satellite(){
   $('pond').textContent=Math.round(L.pond*100)+'%';
   S.ndvi=L.ndvi;S.ndmi=L.ndmi;S.pond=L.pond;S.drop=P?L.ndvi-P.ndvi:null;S.ndviMax=Math.max(...out.map(x=>x.ndvi));render();shape(ndviColor(L.ndvi));
   drawPx(L);
+  poly.unbindTooltip();
   poly.bindTooltip(`NDVI ${L.ndvi.toFixed(2)} · ${fmtD(L.date)}`,{permanent:true,direction:'center'});
   const t=s=>new Date(s.date+'T12:00').getTime();
   chart($('ndviChart'),out.map(s=>({x:t(s),y:s.ndvi})),{color:'var(--ok)',min:0,max:Math.max(.8,...out.map(s=>s.ndvi)),dots:true,label:'NDVI over time'});
+}
+async function satellite(){
+  const end=new Date(),start=new Date(end-LOOKBACK_DAYS*864e5);
+  $('satmsg').textContent='Searching for satellite passes…';
+  const r=await fetch('https://earth-search.aws.element84.com/v1/search',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({collections:['sentinel-2-l2a'],intersects:{type:'Polygon',coordinates:[[...FIELD,FIELD[0]]]},datetime:start.toISOString().slice(0,10)+'T00:00:00Z/'+end.toISOString().slice(0,10)+'T23:59:59Z',limit:40,query:{'eo:cloud_cover':{lt:60}},sortby:[{field:'properties.datetime',direction:'desc'}]})});
+  if(!r.ok)throw new Error('STAC search '+r.status);
+  const items=(await r.json()).features;   // newest first
+  if(!items.length){$('ndvidate').textContent='no passes found';$('satmsg').textContent='The satellite catalogue returned no recent passes for this field.';return}
+  const out=[],seen=new Set();let cloudy=0,errors=0;
+  for(let i=0;i<items.length&&out.length<8;i+=3){
+    $('satmsg').textContent=`Reading satellite scenes… ${Math.min(i+3,items.length)} of ${items.length}`;
+    const res=await Promise.all(items.slice(i,i+3).map(it=>scene(it).catch(e=>{lastErr=e;errors++;console.warn('scene failed',it.id,e);return 'err'})));
+    res.forEach(s=>{if(s==='err')return;if(!s){cloudy++;return}if(!seen.has(s.date)&&isFinite(s.ndvi)){seen.add(s.date);out.push(s)}});
+    if(out.length)showSat(out);   // show results as soon as the first clear pass is read
+  }
+  $('satmsg').textContent='';
+  if(!out.length){
+    $('ndvidate').textContent=errors?'could not read satellite files':'no clear pass found';
+    $('satmsg').textContent=errors?`Found ${items.length} passes but could not read the image files (${lastErr&&lastErr.message}). If you use Brave, try turning Shields off for this site.`:'Every recent satellite picture was too cloudy over the field. This is common in monsoon. Check again in a few days.';
+  }
 }
 weather().catch(e=>{failed(e);$('alerts').innerHTML='<div class="alert">Could not load weather ('+e.message+'). Check your connection and refresh.</div>'});
 satellite().catch(e=>{failed(e);$('ndvidate').textContent='satellite data unavailable';$('satmsg').textContent='Could not load satellite data ('+e.message+'). Refresh to retry.'});
